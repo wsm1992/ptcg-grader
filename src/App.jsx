@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { Upload, Move, RefreshCw, ChevronUp, ChevronDown, ChevronLeft, ChevronRight, Ruler, ArrowLeft, ArrowRight, Loader2, Minus, Plus, Maximize2, Minimize2, MousePointerClick, Download } from 'lucide-react';
+import { Upload, Move, RefreshCw, ChevronUp, ChevronDown, ChevronLeft, ChevronRight, Ruler, ArrowLeft, ArrowRight, Loader2, Minus, Plus, Maximize2, Minimize2, MousePointerClick, Download, Save, FileJson, FileImage } from 'lucide-react';
 
 // 固定的基本寬度
 const BASE_TARGET_WIDTH = 1000; 
@@ -264,10 +264,17 @@ const Magnifier = React.memo(({ magnifierState, zoom, cardImage }) => {
 function CardGraderTool() {
   const [step, setStep] = useState('upload'); 
   const [originalImage, setOriginalImage] = useState(null); 
+  // 記錄原始檔名，方便下載 JSON 時命名
+  const [originalFileName, setOriginalFileName] = useState("card"); 
   const [processedImage, setProcessedImage] = useState(null); 
   const [isProcessing, setIsProcessing] = useState(false);
   const [zoomLevel, setZoomLevel] = useState(1.0); 
+  // 新增: 用於顯示 HEIC 轉換中的狀態文字
+  const [loadingText, setLoadingText] = useState("正在進行透視校正 (Homography)...");
   
+  // 新增: 暫存載入的 JSON 設定檔
+  const [pendingProjectData, setPendingProjectData] = useState(null);
+
   // 新增: 控制放大鏡面板收折狀態
   const [isMagnifierPanelCollapsed, setIsMagnifierPanelCollapsed] = useState(false);
 
@@ -365,34 +372,156 @@ function CardGraderTool() {
     return { x: screenX, y: screenY };
   }, [processedImage, lastInteractionCoords, measureLinesRef, getLiveImageRect]);
 
-  // --- Handlers: Upload ---
-  const handleImageUpload = (e) => {
+  // --- Handlers: Soft Reset (跳回首頁，不刷新頁面) ---
+  const handleReset = () => {
+      setStep('upload');
+      setOriginalImage(null);
+      setProcessedImage(null);
+      setPendingProjectData(null);
+      setOriginalFileName("card");
+      setZoomLevel(1.0);
+      setLastActivePointIndex(null);
+      setSelectedLineId(null);
+      setDraggingLineId(null);
+      // 重置測量線為預設值
+      setMeasureLines({
+        outerTop: 2, innerTop: 12, outerBottom: 98, innerBottom: 88,
+        outerLeft: 3, innerLeft: 13, outerRight: 97, innerRight: 87
+      });
+      // 這裡不需要重置 cropPoints，因為下次上傳圖片時 handleImageUpload 會自動重置
+  };
+
+  // --- Handlers: JSON Import ---
+  const handleJsonUpload = (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+
+      const reader = new FileReader();
+      reader.onload = (event) => {
+          try {
+              const data = JSON.parse(event.target.result);
+              if (data && data.cropPoints && data.measureLines) {
+                  setPendingProjectData(data);
+                  // 不再彈出 alert，直接改變 UI 狀態
+              } else {
+                  alert("錯誤：無效的專案設定檔 (JSON)");
+              }
+          } catch (err) {
+              console.error("JSON parse error", err);
+              alert("錯誤：無法讀取 JSON 檔案");
+          }
+      };
+      reader.readAsText(file);
+      // 清空 input 讓同名檔案可再次觸發
+      e.target.value = '';
+  };
+
+  // --- Handlers: Export Project (JSON) ---
+  const handleExportJSON = () => {
+      if (!originalImage) return;
+      
+      const data = {
+          version: "1.0",
+          timestamp: Date.now(),
+          imageName: originalFileName,
+          cropPoints: cropPoints,
+          measureLines: measureLines,
+          results: calculateResults()
+      };
+      
+      const jsonStr = JSON.stringify(data, null, 2);
+      const blob = new Blob([jsonStr], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      
+      const link = document.createElement('a');
+      // 移除副檔名，加上 .json
+      const baseName = originalFileName.replace(/\.[^/.]+$/, "");
+      link.download = `${baseName}_grading.json`;
+      link.href = url;
+      link.click();
+      URL.revokeObjectURL(url);
+  };
+
+  // --- Handlers: Upload Image ---
+  const handleImageUpload = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
+    
+    // HEIC/HEIF 支援邏輯
+    const isHeic = file.type === "image/heic" || file.type === "image/heif" || file.name.toLowerCase().endsWith(".heic") || file.name.toLowerCase().endsWith(".heif");
 
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      const img = new Image();
-      img.crossOrigin = "anonymous";
-      img.onload = () => {
-        setOriginalImage(img);
-        const dims = { w: img.naturalWidth, h: img.naturalHeight };
-        setOriginalCardDims(dims); 
-        
-        // 初始綠點位置 (Normalized)
-        const initialCropPoints = [
-          { x: 0.15, y: 0.15 }, { x: 0.85, y: 0.15 }, 
-          { x: 0.85, y: 0.85 }, { x: 0.15, y: 0.85 }, 
-        ];
-        
-        setCropPoints(initialCropPoints);
-        setLastActivePointIndex(null); // 重置選中的點
-        setProcessedImage(null); 
-        setStep('crop');
+    if (isHeic) {
+        setLoadingText("正在將 HEIC 格式轉換為 JPG...");
+        setIsProcessing(true);
+        try {
+            // 動態導入 heic2any，避免初始 bundle 過大或依賴問題
+            const heic2any = (await import('https://cdn.skypack.dev/heic2any')).default;
+            
+            const convertedBlob = await heic2any({
+                blob: file,
+                toType: "image/jpeg",
+                quality: 0.8
+            });
+            
+            // 處理轉換後的 Blob (可能是陣列，如果是 Live Photo)
+            const finalBlob = Array.isArray(convertedBlob) ? convertedBlob[0] : convertedBlob;
+            
+            // 將 Blob 轉為 File 物件以便後續處理
+            const convertedFile = new File([finalBlob], file.name.replace(/\.(heic|heif)$/i, ".jpg"), {
+                type: "image/jpeg",
+                lastModified: new Date().getTime()
+            });
+            
+            // 遞迴調用 (模擬上傳 JPEG)
+            // 這裡我們直接用 FileReader 讀取轉換後的 blob 比較快，不用遞迴
+            processImageFile(convertedFile);
+            
+        } catch (error) {
+            console.error("HEIC conversion failed:", error);
+            alert("HEIC 轉換失敗，請確認網路連線 (需載入轉換庫) 或嘗試上傳 JPG/PNG。");
+            setIsProcessing(false);
+        }
+    } else {
+        // 標準 JPG/PNG 處理
+        processImageFile(file);
+    }
+    
+    e.target.value = ''; // 允許重複上傳同檔名
+  };
+
+  // 抽離出圖片處理邏輯
+  const processImageFile = (file) => {
+      setOriginalFileName(file.name); 
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        const img = new Image();
+        img.crossOrigin = "anonymous";
+        img.onload = () => {
+          setOriginalImage(img);
+          const dims = { w: img.naturalWidth, h: img.naturalHeight };
+          setOriginalCardDims(dims); 
+          
+          if (pendingProjectData) {
+              setCropPoints(pendingProjectData.cropPoints);
+              setMeasureLines(pendingProjectData.measureLines);
+              setPendingProjectData(null); 
+              setProcessedImage(null); 
+              setStep('crop');
+          } else {
+              const initialCropPoints = [
+                { x: 0.15, y: 0.15 }, { x: 0.85, y: 0.15 }, 
+                { x: 0.85, y: 0.85 }, { x: 0.15, y: 0.85 }, 
+              ];
+              setCropPoints(initialCropPoints);
+              setProcessedImage(null); 
+              setStep('crop');
+          }
+          setLastActivePointIndex(null);
+          setIsProcessing(false); // 關閉 loading
+        };
+        img.src = event.target.result;
       };
-      img.src = event.target.result;
-    };
-    reader.readAsDataURL(file);
+      reader.readAsDataURL(file);
   };
 
   // --- Helper: Coordinate Mapping ---
@@ -505,6 +634,7 @@ function CardGraderTool() {
 
   const performWarpAndProceed = useCallback(async () => {
     if (!originalImage || !originalImage.src) return; 
+    setLoadingText("正在進行透視校正 (Homography)...");
     setIsProcessing(true);
     try {
         const srcW = originalCardDims.w;
@@ -687,6 +817,13 @@ function CardGraderTool() {
       }
       if (targetX !== undefined) showFixedMagnifierAt(targetX, targetY);
   }
+
+  // New helper: cycle through zoom options
+  const cycleZoom = () => {
+      const currentIndex = zoomOptions.indexOf(zoomLevel);
+      const nextIndex = (currentIndex + 1) % zoomOptions.length;
+      handleZoomChange(zoomOptions[nextIndex]);
+  };
   
   // 新增: 下載合成結果圖片
   const downloadResultImage = async () => {
@@ -789,17 +926,66 @@ function CardGraderTool() {
   const handleBackToCrop = () => { setStep('crop'); setSelectedLineId(null); setProcessedImage(null); };
   
   const isImageStep = step === 'crop' || step === 'measure';
-  const mainClass = `flex-1 relative w-full overflow-auto select-none p-2 md:p-6 flex justify-center ${isImageStep ? 'items-start' : 'items-center'}`; 
+  // 修改：一律使用 items-start，避免強制置中導致手機版頂部被遮擋
+  const mainClass = `flex-1 relative w-full overflow-auto select-none p-2 md:p-6 flex justify-center items-start`; 
 
   return (
     <div className="h-screen bg-gray-950 text-white font-sans flex flex-col overflow-hidden">
       <header className="bg-gray-900 border-b border-gray-800 h-12 flex items-center justify-between px-4 shrink-0 z-50">
         <div className="flex items-center gap-2"><Ruler className="text-blue-400" size={18} /><span className="font-bold text-sm md:text-base bg-gradient-to-r from-blue-400 to-purple-400 bg-clip-text text-transparent">PTCG Grade (虛線修復版 v22)</span></div>
-        <div className="flex items-center gap-2 text-xs">{step !== 'upload' && (<button onClick={() => window.location.reload()} className="hover:text-white text-gray-400 flex items-center gap-1"><RefreshCw size={12}/> 重置</button>)}</div>
+        <div className="flex items-center gap-2 text-xs">{step !== 'upload' && (<button onClick={handleReset} className="hover:text-white text-gray-400 flex items-center gap-1"><RefreshCw size={12}/> 重置</button>)}</div>
       </header>
       <main className={mainClass}>
         {step === 'upload' && (
-             <div className="flex-1 flex flex-col items-center justify-center p-6"><div className="w-full max-w-md aspect-[3/4] border-2 border-dashed border-gray-700 rounded-2xl bg-gray-900 hover:border-blue-500 transition-all relative flex flex-col items-center justify-center group cursor-pointer"><Upload size={48} className="text-gray-600 group-hover:text-blue-400 mb-4 transition-colors"/><input type="file" accept="image/*" onChange={handleImageUpload} className="absolute inset-0 opacity-0 cursor-pointer z-10" /><p className="text-gray-400 font-medium">點擊上傳卡牌照片</p><p className="text-gray-600 text-xs mt-2">請確保卡牌四角清晰</p></div></div>
+             // 修改：在手機版增加 pt-12 並使用 justify-start，確保不被 Header 遮擋；電腦版則恢復置中
+             <div className="flex-1 flex flex-col items-center justify-start pt-12 md:justify-center md:pt-0 w-full max-w-4xl gap-6 p-6">
+                 
+                 {/* 狀態提示：如果已載入 JSON */}
+                 {pendingProjectData && (
+                     <div className="bg-green-900/20 border border-green-500/30 p-3 rounded-lg text-center w-full max-w-sm animate-in fade-in slide-in-from-bottom-4">
+                         <div className="flex items-center justify-center gap-2 text-green-400 font-bold text-sm mb-1">
+                             <FileJson size={16}/>
+                             <span>專案設定已就緒</span>
+                         </div>
+                         <div className="text-gray-400 text-xs break-all">{pendingProjectData.imageName}</div>
+                     </div>
+                 )}
+
+                 {/* 主上傳區塊 */}
+                 <div className={`w-full max-w-md aspect-[3/4] border-2 border-dashed rounded-2xl transition-all relative flex flex-col items-center justify-center group cursor-pointer shadow-2xl p-6 ${pendingProjectData ? 'border-green-500/50 bg-green-900/10 hover:bg-green-900/20' : 'border-gray-700 bg-gray-900 hover:border-blue-500'}`}>
+                     {pendingProjectData ? (
+                        <FileImage size={64} className="text-green-500/80 mb-6 animate-pulse" />
+                     ) : (
+                        <Upload size={64} className="text-gray-600 group-hover:text-blue-400 mb-6 transition-colors"/>
+                     )}
+                     
+                     <input type="file" accept="image/*,.heic,.heif" onChange={handleImageUpload} className="absolute inset-0 opacity-0 cursor-pointer z-10" />
+                     
+                     <p className={`font-bold text-xl mb-2 ${pendingProjectData ? 'text-green-400' : 'text-gray-300'}`}>
+                         {pendingProjectData ? '請上傳對應圖片' : '上傳卡牌照片'}
+                     </p>
+                     <p className="text-gray-500 text-sm text-center">
+                         {pendingProjectData ? '還原校正與測量數據' : '支援 JPG, PNG, HEIC (確保四角清晰)'}
+                     </p>
+                 </div>
+
+                 {/* 底部按鈕區 */}
+                 <div className="flex flex-col items-center gap-3">
+                     {!pendingProjectData ? (
+                         <div className="relative group">
+                             <button className="flex items-center gap-2 text-gray-400 group-hover:text-white px-5 py-2.5 rounded-full border border-gray-700 group-hover:border-gray-500 bg-gray-800/50 transition-all text-sm">
+                                 <FileJson size={16} />
+                                 <span>載入專案設定 (.json)</span>
+                             </button>
+                             <input type="file" accept=".json" onChange={handleJsonUpload} className="absolute inset-0 opacity-0 cursor-pointer" />
+                         </div>
+                     ) : (
+                         <button onClick={() => setPendingProjectData(null)} className="text-gray-600 hover:text-gray-400 text-xs py-2 transition-colors">
+                             取消載入 (返回一般上傳)
+                         </button>
+                     )}
+                 </div>
+             </div>
         )}
         {(step === 'crop' || step === 'measure') && (
             <div className={`flex-shrink-0 select-none ${step === 'measure' ? 'max-h-[85vh] overflow-y-auto bg-gray-800 rounded-xl p-2 w-fit max-w-full' : 'relative w-fit h-fit'}`} ref={containerRef}>
@@ -826,7 +1012,13 @@ function CardGraderTool() {
                             )}
                             {isMagnifierPanelCollapsed && (
                                 <div className="flex flex-col items-center gap-1">
-                                    <div className="text-[10px] font-bold text-blue-400">{zoomLevel.toFixed(1)}X</div>
+                                    <button 
+                                        onClick={cycleZoom}
+                                        className="text-[10px] font-bold text-blue-400 hover:text-white transition-colors w-full text-center"
+                                        title="點擊切換倍率"
+                                    >
+                                        {zoomLevel.toFixed(1)}X
+                                    </button>
                                 </div>
                             )}
                         </div>
@@ -857,7 +1049,7 @@ function CardGraderTool() {
                         </div>
                     )}
                 </div>
-                {isProcessing && (<div className="fixed inset-0 bg-black/80 z-50 flex flex-col items-center justify-center text-white"><Loader2 className="animate-spin mb-4" size={40}/><p>正在進行透視校正 (Homography)...</p></div>)}
+                {isProcessing && (<div className="fixed inset-0 bg-black/80 z-50 flex flex-col items-center justify-center text-white"><Loader2 className="animate-spin mb-4" size={40}/><p>{loadingText}</p></div>)}
             </div>
         )}
       </main>
@@ -894,7 +1086,7 @@ function CardGraderTool() {
             )}
             {step === 'measure' && (
                 <div className="flex flex-col gap-3">
-                    <div className="flex items-center justify-between"><button onClick={handleBackToCrop} className="text-gray-500 hover:text-white px-2 py-1 flex items-center gap-1 text-xs"><ArrowLeft size={14}/> 重調四角 (保留上次位置)</button><div className="flex items-center gap-2"><button onClick={() => nudgeLine(-1)} disabled={!selectedLineId} className={`w-10 h-10 rounded-full flex items-center justify-center border transition-colors ${selectedLineId ? 'bg-gray-800 hover:bg-gray-700 border-gray-700 text-white' : 'bg-gray-900 border-gray-800 text-gray-600 cursor-not-allowed'}`}>{(selectedLineId?.includes('Top') || selectedLineId?.includes('Bottom')) ? <ChevronUp size={20}/> : <ChevronLeft size={20}/>}</button><div className="text-center w-24"><div className="text-[10px] text-gray-500 uppercase tracking-wider">微調</div><div className="text-xs font-bold text-blue-300 truncate">{selectedLineId ? (selectedLineId.includes('outer') ? '藍線 (卡邊)' : '紅線 (圖案)') : '請點選虛線'}</div></div><button onClick={() => nudgeLine(1)} disabled={!selectedLineId} className={`w-10 h-10 rounded-full flex items-center justify-center border transition-colors ${selectedLineId ? 'bg-gray-800 hover:bg-gray-700 border-gray-700 text-white' : 'bg-gray-900 border-gray-800 text-gray-600 cursor-not-allowed'}`}>{(selectedLineId?.includes('Top') || selectedLineId?.includes('Bottom')) ? <ChevronDown size={20}/> : <ChevronRight size={20}/>}</button></div><div className="w-16 flex justify-end"><button onClick={downloadResultImage} className="bg-gray-700 hover:bg-gray-600 text-white p-2 rounded-lg flex items-center gap-2 text-xs transition-colors" title="下載結果圖"><Download size={16}/><span className="hidden md:inline">下載結果</span></button></div></div>
+                    <div className="flex items-center justify-between"><button onClick={handleBackToCrop} className="text-gray-500 hover:text-white px-2 py-1 flex items-center gap-1 text-xs"><ArrowLeft size={14}/> 重調四角 (保留上次位置)</button><div className="flex items-center gap-2"><button onClick={() => nudgeLine(-1)} disabled={!selectedLineId} className={`w-10 h-10 rounded-full flex items-center justify-center border transition-colors ${selectedLineId ? 'bg-gray-800 hover:bg-gray-700 border-gray-700 text-white' : 'bg-gray-900 border-gray-800 text-gray-600 cursor-not-allowed'}`}>{(selectedLineId?.includes('Top') || selectedLineId?.includes('Bottom')) ? <ChevronUp size={20}/> : <ChevronLeft size={20}/>}</button><div className="text-center w-24"><div className="text-[10px] text-gray-500 uppercase tracking-wider">微調</div><div className="text-xs font-bold text-blue-300 truncate">{selectedLineId ? (selectedLineId.includes('outer') ? '藍線 (卡邊)' : '紅線 (圖案)') : '請點選虛線'}</div></div><button onClick={() => nudgeLine(1)} disabled={!selectedLineId} className={`w-10 h-10 rounded-full flex items-center justify-center border transition-colors ${selectedLineId ? 'bg-gray-800 hover:bg-gray-700 border-gray-700 text-white' : 'bg-gray-900 border-gray-800 text-gray-600 cursor-not-allowed'}`}>{(selectedLineId?.includes('Top') || selectedLineId?.includes('Bottom')) ? <ChevronDown size={20}/> : <ChevronRight size={20}/>}</button></div><div className="w-16 flex justify-end gap-2"><button onClick={handleExportJSON} className="bg-blue-700 hover:bg-blue-600 text-white p-2 rounded-lg flex items-center gap-2 text-xs transition-colors" title="儲存專案 (JSON)"><Save size={16}/></button><button onClick={downloadResultImage} className="bg-gray-700 hover:bg-gray-600 text-white p-2 rounded-lg flex items-center gap-2 text-xs transition-colors" title="下載結果圖 (PNG)"><Download size={16}/></button></div></div>
                     <div className="bg-black/40 rounded-lg p-2 flex items-center justify-around border border-gray-700"><div className="flex flex-col items-center w-1/2 border-r border-gray-700"><span className="text-[10px] text-gray-400 uppercase">左右比例 (H)</span><div className="flex items-baseline gap-1"><span className={`text-lg font-bold ${Math.abs(results.h.left - results.h.right) <= 10 ? 'text-green-400' : 'text-yellow-400'}`}>{results.h.left.toFixed(1)} : {results.h.right.toFixed(1)}</span></div></div><div className="flex flex-col items-center w-1/2"><span className="text-[10px] text-gray-400 uppercase">上下比例 (V)</span><div className="flex items-baseline gap-1"><span className={`text-lg font-bold ${Math.abs(results.v.top - results.v.bottom) <= 10 ? 'text-green-400' : 'text-yellow-400'}`}>{results.v.top.toFixed(1)} : {results.v.bottom.toFixed(1)}</span></div></div></div>
                 </div>
             )}
