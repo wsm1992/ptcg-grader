@@ -1,8 +1,13 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { Upload, Move, RefreshCw, ChevronUp, ChevronDown, ChevronLeft, ChevronRight, Ruler, ArrowLeft, ArrowRight, Loader2, Minus, Plus, Maximize2, Minimize2, MousePointerClick, Download, Save, FileJson, FileImage } from 'lucide-react';
+// 新增引入 Image as ImageIcon 以避免名稱衝突
+import { Upload, Move, RefreshCw, ChevronUp, ChevronDown, ChevronLeft, ChevronRight, Ruler, ArrowLeft, ArrowRight, Loader2, Minus, Plus, Maximize2, Minimize2, MousePointerClick, Download, Save, FileJson, FileImage, Image as ImageIcon } from 'lucide-react';
 
-// 固定的基本寬度
-const BASE_TARGET_WIDTH = 1000; 
+// 改為最小目標寬度，不再是固定寬度
+const MIN_TARGET_WIDTH = 1000; 
+// 為了瀏覽器效能，設定一個合理的上限 (4K解析度寬度)
+const MAX_TARGET_WIDTH = 4096;
+// 顯示用的基礎寬度限制
+const BASE_TARGET_WIDTH = 1000;
 
 const MAGNIFIER_SIZE = 225; 
 
@@ -640,18 +645,23 @@ function CardGraderTool() {
         const srcW = originalCardDims.w;
         const srcH = originalCardDims.h;
 
-        // 移除強制 PTCG 比例的邏輯，永遠使用動態比例計算
+        // 計算裁切區域在原圖中的實際像素尺寸
         const P0 = cropPoints[0], P1 = cropPoints[1], P2 = cropPoints[2], P3 = cropPoints[3];
-        // 使用實際像素計算距離
-        const dist = (pA, pB) => Math.sqrt(Math.pow((pA.x - pB.x) * srcW, 2) + Math.pow((pA.y - pB.y) * srcH, 2));
+        const distPx = (pA, pB) => Math.sqrt(Math.pow((pA.x - pB.x) * srcW, 2) + Math.pow((pA.y - pB.y) * srcH, 2));
         
-        const avgW = (dist(P0, P1) + dist(P3, P2)) / 2;
-        const avgH = (dist(P0, P3) + dist(P1, P2)) / 2;
+        const avgSrcW = (distPx(P0, P1) + distPx(P3, P2)) / 2;
+        const avgSrcH = (distPx(P0, P3) + distPx(P1, P2)) / 2;
         
-        if (avgH < 1 || avgW < 1) throw new Error("裁剪區域無效。");
+        if (avgSrcH < 1 || avgSrcW < 1) throw new Error("裁剪區域無效。");
         
-        const targetW = BASE_TARGET_WIDTH;
-        const targetH = Math.max(100, Math.min(10000, Math.round(BASE_TARGET_WIDTH / (avgW / avgH)))); 
+        // *** 關鍵修改：動態解析度 ***
+        // 目標寬度 = 原圖裁切寬度 (但限制在 MIN ~ MAX 之間)
+        // 這樣如果是大圖，就會保持大圖的解析度
+        const targetW = Math.max(MIN_TARGET_WIDTH, Math.min(MAX_TARGET_WIDTH, Math.round(avgSrcW)));
+        
+        // 根據來源比例計算對應的高度
+        const ratio = avgSrcW / avgSrcH;
+        const targetH = Math.round(targetW / ratio);
         
         const srcPoints = cropPoints.map(p => ([p.x * srcW, p.y * srcH]));
         const dstPoints = [[0, 0], [targetW, 0], [targetW, targetH], [0, targetH]];
@@ -990,6 +1000,7 @@ function CardGraderTool() {
         {(step === 'crop' || step === 'measure') && (
             <div className={`flex-shrink-0 select-none ${step === 'measure' ? 'max-h-[85vh] overflow-y-auto bg-gray-800 rounded-xl p-2 w-fit max-w-full' : 'relative w-fit h-fit'}`} ref={containerRef}>
                 <div className="relative w-fit h-fit">
+                    {/* *** 關鍵修復：補回 BASE_TARGET_WIDTH 的定義後，這裡就不會出錯了 *** */}
                     <img ref={imgRef} src={step === 'crop' ? originalImage?.src : processedImage?.src} alt="Work" className="object-contain pointer-events-none shadow-2xl" style={step === 'crop' ? { maxWidth: `${BASE_TARGET_WIDTH}px`, maxHeight: '80vh' } : (processedImage ? { width: `${processedImage.naturalWidth}px`, height: 'auto' } : {})} />
                     
                     {/* 改良後的放大鏡面板: 可收折 */}
@@ -1086,7 +1097,7 @@ function CardGraderTool() {
             )}
             {step === 'measure' && (
                 <div className="flex flex-col gap-3">
-                    <div className="flex items-center justify-between"><button onClick={handleBackToCrop} className="text-gray-500 hover:text-white px-2 py-1 flex items-center gap-1 text-xs"><ArrowLeft size={14}/> 重調四角 (保留上次位置)</button><div className="flex items-center gap-2"><button onClick={() => nudgeLine(-1)} disabled={!selectedLineId} className={`w-10 h-10 rounded-full flex items-center justify-center border transition-colors ${selectedLineId ? 'bg-gray-800 hover:bg-gray-700 border-gray-700 text-white' : 'bg-gray-900 border-gray-800 text-gray-600 cursor-not-allowed'}`}>{(selectedLineId?.includes('Top') || selectedLineId?.includes('Bottom')) ? <ChevronUp size={20}/> : <ChevronLeft size={20}/>}</button><div className="text-center w-24"><div className="text-[10px] text-gray-500 uppercase tracking-wider">微調</div><div className="text-xs font-bold text-blue-300 truncate">{selectedLineId ? (selectedLineId.includes('outer') ? '藍線 (卡邊)' : '紅線 (圖案)') : '請點選虛線'}</div></div><button onClick={() => nudgeLine(1)} disabled={!selectedLineId} className={`w-10 h-10 rounded-full flex items-center justify-center border transition-colors ${selectedLineId ? 'bg-gray-800 hover:bg-gray-700 border-gray-700 text-white' : 'bg-gray-900 border-gray-800 text-gray-600 cursor-not-allowed'}`}>{(selectedLineId?.includes('Top') || selectedLineId?.includes('Bottom')) ? <ChevronDown size={20}/> : <ChevronRight size={20}/>}</button></div><div className="w-16 flex justify-end gap-2"><button onClick={handleExportJSON} className="bg-blue-700 hover:bg-blue-600 text-white p-2 rounded-lg flex items-center gap-2 text-xs transition-colors" title="儲存專案 (JSON)"><Save size={16}/></button><button onClick={downloadResultImage} className="bg-gray-700 hover:bg-gray-600 text-white p-2 rounded-lg flex items-center gap-2 text-xs transition-colors" title="下載結果圖 (PNG)"><Download size={16}/></button></div></div>
+                    <div className="flex items-center justify-between"><button onClick={handleBackToCrop} className="text-gray-500 hover:text-white px-2 py-1 flex items-center gap-1 text-xs"><ArrowLeft size={14}/> 重調四角 (保留上次位置)</button><div className="flex items-center gap-2"><button onClick={() => nudgeLine(-1)} disabled={!selectedLineId} className={`w-10 h-10 rounded-full flex items-center justify-center border transition-colors ${selectedLineId ? 'bg-gray-800 hover:bg-gray-700 border-gray-700 text-white' : 'bg-gray-900 border-gray-800 text-gray-600 cursor-not-allowed'}`}>{(selectedLineId?.includes('Top') || selectedLineId?.includes('Bottom')) ? <ChevronUp size={20}/> : <ChevronLeft size={20}/>}</button><div className="text-center w-24"><div className="text-[10px] text-gray-500 uppercase tracking-wider">微調</div><div className="text-xs font-bold text-blue-300 truncate">{selectedLineId ? (selectedLineId.includes('outer') ? '藍線 (卡邊)' : '紅線 (圖案)') : '請點選虛線'}</div></div><button onClick={() => nudgeLine(1)} disabled={!selectedLineId} className={`w-10 h-10 rounded-full flex items-center justify-center border transition-colors ${selectedLineId ? 'bg-gray-800 hover:bg-gray-700 border-gray-700 text-white' : 'bg-gray-900 border-gray-800 text-gray-600 cursor-not-allowed'}`}>{(selectedLineId?.includes('Top') || selectedLineId?.includes('Bottom')) ? <ChevronDown size={20}/> : <ChevronRight size={20}/>}</button></div><div className="flex justify-end gap-2"><button onClick={handleExportJSON} className="bg-blue-600 hover:bg-blue-500 text-white p-2 rounded-lg shadow-sm transition-colors" title="儲存專案檔 (.json)"><FileJson size={20}/></button><button onClick={downloadResultImage} className="bg-emerald-600 hover:bg-emerald-500 text-white p-2 rounded-lg shadow-sm transition-colors" title="下載結果圖 (.png)"><ImageIcon size={20}/></button></div></div>
                     <div className="bg-black/40 rounded-lg p-2 flex items-center justify-around border border-gray-700"><div className="flex flex-col items-center w-1/2 border-r border-gray-700"><span className="text-[10px] text-gray-400 uppercase">左右比例 (H)</span><div className="flex items-baseline gap-1"><span className={`text-lg font-bold ${Math.abs(results.h.left - results.h.right) <= 10 ? 'text-green-400' : 'text-yellow-400'}`}>{results.h.left.toFixed(1)} : {results.h.right.toFixed(1)}</span></div></div><div className="flex flex-col items-center w-1/2"><span className="text-[10px] text-gray-400 uppercase">上下比例 (V)</span><div className="flex items-baseline gap-1"><span className={`text-lg font-bold ${Math.abs(results.v.top - results.v.bottom) <= 10 ? 'text-green-400' : 'text-yellow-400'}`}>{results.v.top.toFixed(1)} : {results.v.bottom.toFixed(1)}</span></div></div></div>
                 </div>
             )}
