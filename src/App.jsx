@@ -906,7 +906,9 @@ function CardGraderTool() {
 
     // 觸發下載
     const link = document.createElement('a');
-    link.download = 'ptcg-grade-result.png';
+    // 修改這裡：使用與 JSON 相同的命名邏輯
+    const baseName = originalFileName.replace(/\.[^/.]+$/, "");
+    link.download = `${baseName}_grading.png`;
     link.href = canvas.toDataURL('image/png');
     link.click();
   };
