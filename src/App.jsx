@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 // 新增引入 Image as ImageIcon 以避免名稱衝突
-import { Upload, Move, RefreshCw, ChevronUp, ChevronDown, ChevronLeft, ChevronRight, Ruler, ArrowLeft, ArrowRight, Loader2, Minus, Plus, Maximize2, Minimize2, MousePointerClick, Download, Save, FileJson, FileImage, Image as ImageIcon } from 'lucide-react';
+import { Upload, Move, RefreshCw, ChevronUp, ChevronDown, ChevronLeft, ChevronRight, Ruler, ArrowLeft, ArrowRight, Loader2, Minus, Plus, Maximize2, Minimize2, MousePointerClick, Download, Save, FileJson, FileImage, Image as ImageIcon, Wand2 } from 'lucide-react';
 
 // 改為最小目標寬度，不再是固定寬度
 const MIN_TARGET_WIDTH = 1000; 
@@ -290,6 +290,9 @@ function CardGraderTool() {
   // 新增: 記錄最後操作的綠點 (0:左上, 1:右上, 2:右下, 3:左下)
   const [lastActivePointIndex, setLastActivePointIndex] = useState(null);
 
+  // 新增: 記錄是否正在進行一般拖曳（空白處檢查）
+  const [isGeneralDragging, setIsGeneralDragging] = useState(false);
+
   const [measureLines, setMeasureLines] = useState({
     outerTop: 2, innerTop: 12, outerBottom: 98, innerBottom: 88,
     outerLeft: 3, innerLeft: 13, outerRight: 97, innerRight: 87
@@ -388,6 +391,7 @@ function CardGraderTool() {
       setLastActivePointIndex(null);
       setSelectedLineId(null);
       setDraggingLineId(null);
+      setIsGeneralDragging(false); // Reset general dragging state
       // 重置測量線為預設值
       setMeasureLines({
         outerTop: 2, innerTop: 12, outerBottom: 98, innerBottom: 88,
@@ -561,6 +565,24 @@ function CardGraderTool() {
     setLastInteractionCoords(prev => ({ ...prev, [id]: { x: clientX, y: clientY } }));
   };
 
+  // 新增: 處理空白處拖曳 (一般放大鏡檢查)
+  const handleGeneralDragStart = (e) => {
+      // 確保不是點擊到了其他控制元素 (雖然結構上 div 已經覆蓋，但多一層保險)
+      setIsGeneralDragging(true);
+      const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+      const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+      
+      const imgRect = getLiveImageRect();
+      if(imgRect) {
+           if (magnifierTimeoutRef.current) { clearTimeout(magnifierTimeoutRef.current); magnifierTimeoutRef.current = null; }
+           setMagnifier(prev => ({ 
+              ...prev, visible: true, isTrackingMouse: true, 
+              targetX: clientX, targetY: clientY, imgRect: imgRect,
+              measureLines: measureLinesRef.current, currentStep: step,
+          }));
+      }
+  };
+
   // Shared move handler
   const handleGlobalMove = useCallback((e) => {
     if (!containerRef.current) return;
@@ -604,19 +626,32 @@ function CardGraderTool() {
             measureLines: measureLinesRef.current, currentStep: step,
         }));
         setLastInteractionCoords(prev => ({ ...prev, [draggingLineId]: { x: clientX, y: clientY } }));
-    } 
-  }, [step, activePointIndex, draggingLineId, cropPoints, getLiveImageRect, showFixedMagnifierAt]); 
+    } else if (step === 'measure' && isGeneralDragging) {
+        // 新增: 處理一般拖曳時的放大鏡更新
+        if (magnifierTimeoutRef.current) { clearTimeout(magnifierTimeoutRef.current); magnifierTimeoutRef.current = null; }
+        
+        setMagnifier(prev => ({ 
+            ...prev, visible: true, isTrackingMouse: true, 
+            targetX: clientX, targetY: clientY, imgRect: imgRect,
+            measureLines: measureLinesRef.current, currentStep: step,
+        }));
+    }
+  }, [step, activePointIndex, draggingLineId, isGeneralDragging, cropPoints, getLiveImageRect, showFixedMagnifierAt]); 
 
   const handleGlobalUp = useCallback(() => {
     const wasCropDragging = activePointIndex !== null;
     const wasLineDragging = draggingLineId !== null;
-    setActivePointIndex(null); setDraggingLineId(null); 
+    const wasGeneralDragging = isGeneralDragging;
     
-    if (wasCropDragging || wasLineDragging) {
+    setActivePointIndex(null); 
+    setDraggingLineId(null); 
+    setIsGeneralDragging(false);
+    
+    if (wasCropDragging || wasLineDragging || wasGeneralDragging) {
           setMagnifier(prev => ({ ...prev, visible: false, isTrackingMouse: false }));
           if (magnifierTimeoutRef.current) { clearTimeout(magnifierTimeoutRef.current); magnifierTimeoutRef.current = null; }
     }
-  }, [draggingLineId, activePointIndex]); 
+  }, [draggingLineId, activePointIndex, isGeneralDragging]); 
 
   useEffect(() => {
     window.addEventListener('mousemove', handleGlobalMove);
@@ -632,7 +667,7 @@ function CardGraderTool() {
   }, [handleGlobalMove, handleGlobalUp]);
 
   const handleGlobalTouchMove = (e) => {
-     if(activePointIndex !== null || draggingLineId !== null) {
+     if(activePointIndex !== null || draggingLineId !== null || isGeneralDragging) {
          e.preventDefault(); handleGlobalMove(e);
      }
   };
@@ -1050,7 +1085,12 @@ function CardGraderTool() {
                         />
                     )}
                     {step === 'measure' && processedImage && (
-                        <div className="absolute inset-0 w-full h-full pointer-events-auto"> 
+                        // *** 新增事件監聽：在圖片容器上監聽 MouseDown 和 TouchStart，觸發一般放大鏡檢查 ***
+                        <div 
+                            className="absolute inset-0 w-full h-full pointer-events-auto cursor-crosshair"
+                            onMouseDown={handleGeneralDragStart}
+                            onTouchStart={handleGeneralDragStart}
+                        > 
                             {renderDraggableLine('outerTop', 'horizontal', 'border-blue-500', false)}
                             {renderDraggableLine('outerBottom', 'horizontal', 'border-blue-500', false)}
                             {renderDraggableLine('outerLeft', 'vertical', 'border-blue-500', false)}
