@@ -131,7 +131,14 @@ const bilinearInterpolation = (imageData, x, y) => {
 const Magnifier = React.memo(({ magnifierState, zoom, cardImage }) => { 
     const { visible, targetX, targetY, imgRect, currentStep, cropPoints, measureLines } = magnifierState;
     const canvasRef = useRef(null);
-    const size = MAGNIFIER_SIZE; 
+    
+    // 動態計算放大鏡尺寸
+    const size = useMemo(() => {
+        if (zoom >= 3) return MAGNIFIER_SIZE * 2;   // 3倍或以上 -> 2倍半徑 (範圍更大)
+        if (zoom >= 2) return MAGNIFIER_SIZE * 1.5; // 2倍 -> 1.5倍半徑
+        return MAGNIFIER_SIZE;                      // 其他 -> 原始大小
+    }, [zoom]);
+
     const halfSize = size / 2;
 
     useEffect(() => {
