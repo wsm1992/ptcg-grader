@@ -1,12 +1,12 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-// 新增引入 Image as ImageIcon 以避免名稱衝突
-import { Upload, Move, RefreshCw, ChevronUp, ChevronDown, ChevronLeft, ChevronRight, Ruler, ArrowLeft, ArrowRight, Loader2, Minus, Plus, Maximize2, Minimize2, MousePointerClick, Download, Save, FileJson, FileImage, Image as ImageIcon, Wand2 } from 'lucide-react';
+// 新增引入 ZoomIn, ZoomOut, RotateCcw (Reset)
+import { Upload, Move, RefreshCw, ChevronUp, ChevronDown, ChevronLeft, ChevronRight, Ruler, ArrowLeft, ArrowRight, Loader2, Minus, Plus, Maximize2, Minimize2, MousePointerClick, Download, Save, FileJson, FileImage, Image as ImageIcon, Wand2, ZoomIn, ZoomOut, RotateCcw } from 'lucide-react';
 
 // 改為最小目標寬度，不再是固定寬度
 const MIN_TARGET_WIDTH = 1000; 
 // 為了瀏覽器效能，設定一個合理的上限 (4K解析度寬度)
 const MAX_TARGET_WIDTH = 4096;
-// 顯示用的基礎寬度限制
+// 顯示用的基礎寬度限制 (僅供參考，實際會以 contain 為主)
 const BASE_TARGET_WIDTH = 1000;
 
 const MAGNIFIER_SIZE = 225; 
@@ -344,7 +344,7 @@ function CardGraderTool() {
   // 新增: 暫存載入的 JSON 設定檔
   const [pendingProjectData, setPendingProjectData] = useState(null);
 
-  // 新增: 控制放大鏡面板收折狀態
+  // 新增: 控制放大鏡面板收折狀態 (雖然現在移到下方，但仍保留邏輯以防萬一)
   const [isMagnifierPanelCollapsed, setIsMagnifierPanelCollapsed] = useState(false);
 
   const [originalCardDims, setOriginalCardDims] = useState({ w: 0, h: 0 }); 
@@ -358,6 +358,9 @@ function CardGraderTool() {
   const [isGeneralDragging, setIsGeneralDragging] = useState(false);
   // 用於長按偵測
   const longPressTimerRef = useRef(null);
+  const touchStartRef = useRef(null);
+  // 新增: 記錄最後一次觸控時間，用於過濾模擬的滑鼠事件
+  const lastTouchTimeRef = useRef(0);
 
   const [measureLines, setMeasureLines] = useState({
     outerTop: 2, innerTop: 12, outerBottom: 98, innerBottom: 88,
@@ -448,6 +451,8 @@ function CardGraderTool() {
 
   // --- Handlers: Soft Reset (跳回首頁，不刷新頁面) ---
   const handleReset = () => {
+      if(!window.confirm('確定要重置所有進度嗎？未儲存的數據將會遺失。')) return;
+
       setStep('upload');
       setOriginalImage(null);
       setProcessedImage(null);
@@ -631,38 +636,88 @@ function CardGraderTool() {
     setLastInteractionCoords(prev => ({ ...prev, [id]: { x: clientX, y: clientY } }));
   };
 
-  // 新增: 處理空白處拖曳 (一般放大鏡檢查)
-  const handleGeneralDragStart = (e) => {
-      // 確保不是點擊到了其他控制元素 (雖然結構上 div 已經覆蓋，但多一層保險)
-      setIsGeneralDragging(true);
-      const clientX = e.touches ? e.touches[0].clientX : e.clientX;
-      const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+  // 新增: 處理空白處拖曳 (一般放大鏡檢查) - Long Press Logic
+  const handleGeneralTouchStart = (e) => {
+      // 確保只有單指觸碰才觸發 (避免縮放手勢衝突)
+      if (e.touches.length !== 1) return;
       
+      const touch = e.touches[0];
+      touchStartRef.current = { x: touch.clientX, y: touch.clientY };
+
+      // *** 關鍵修正 ***
+      // 記錄觸控開始的時間
+      lastTouchTimeRef.current = Date.now();
+
+      // 設定長按計時器
+      longPressTimerRef.current = setTimeout(() => {
+          setIsGeneralDragging(true); // 觸發拖曳模式
+          
+          const imgRect = getLiveImageRect();
+          if(imgRect) {
+               setMagnifier(prev => ({ 
+                  ...prev, visible: true, isTrackingMouse: true, 
+                  targetX: touch.clientX, targetY: touch.clientY, imgRect: imgRect,
+                  measureLines: measureLinesRef.current, currentStep: step,
+              }));
+          }
+      }, 500); // 500ms 視為長按
+  };
+  
+  // 電腦版維持點擊即觸發 (滑鼠操作習慣)
+  const handleGeneralMouseDown = (e) => {
+      // *** 關鍵修正 ***
+      // 如果這個 MouseDown 是在 TouchStart 之後 1000ms 內發生的，視為是手機的模擬點擊
+      // 我們要忽略它，以免立刻觸發拖曳，導致長按邏輯被繞過
+      if (Date.now() - lastTouchTimeRef.current < 1000) {
+          return;
+      }
+
+      setIsGeneralDragging(true);
       const imgRect = getLiveImageRect();
       if(imgRect) {
-           if (magnifierTimeoutRef.current) { clearTimeout(magnifierTimeoutRef.current); magnifierTimeoutRef.current = null; }
            setMagnifier(prev => ({ 
               ...prev, visible: true, isTrackingMouse: true, 
-              targetX: clientX, targetY: clientY, imgRect: imgRect,
+              targetX: e.clientX, targetY: e.clientY, imgRect: imgRect,
               measureLines: measureLinesRef.current, currentStep: step,
           }));
       }
   };
 
-  // *** 關鍵修復：定義 JSX 中使用的 Event Handler ***
-  const handleGeneralMouseDown = handleGeneralDragStart;
-  const handleGeneralTouchStart = handleGeneralDragStart;
-
   // Shared move handler
   const handleGlobalMove = useCallback((e) => {
+    // 檢查是否取消長按
+    if (longPressTimerRef.current && !isGeneralDragging && e.touches) {
+        const touch = e.touches[0];
+        const start = touchStartRef.current;
+        if (start) {
+            const dist = Math.sqrt(Math.pow(touch.clientX - start.x, 2) + Math.pow(touch.clientY - start.y, 2));
+            if (dist > 10) { // 如果移動超過 10px，視為滑動，取消長按
+                clearTimeout(longPressTimerRef.current);
+                longPressTimerRef.current = null;
+            }
+        }
+    }
+
     if (!containerRef.current) return;
     const clientX = e.touches ? e.touches[0].clientX : e.clientX;
     const clientY = e.touches ? e.touches[0].clientY : e.clientY;
     currentMousePosRef.current = { clientX, clientY };
 
-    // *** 關鍵: 直接從 DOM 讀取圖片的即時位置 Rect ***
     const imgRect = getLiveImageRect(); 
     if (!imgRect || imgRect.width === 0) return; 
+
+    // 如果是背景拖曳且已經觸發長按 (isGeneralDragging)，則更新放大鏡
+    if (isGeneralDragging && step === 'measure') {
+         if (magnifierTimeoutRef.current) { clearTimeout(magnifierTimeoutRef.current); magnifierTimeoutRef.current = null; }
+         setMagnifier(prev => ({ 
+            ...prev, visible: true, isTrackingMouse: true, 
+            targetX: clientX, targetY: clientY, imgRect: imgRect,
+            measureLines: measureLinesRef.current, currentStep: step,
+        }));
+        // 防止頁面捲動
+        if (e.cancelable) e.preventDefault();
+        return;
+    }
 
     const relativeX = clientX - imgRect.left;
     const relativeY = clientY - imgRect.top;
@@ -696,19 +751,16 @@ function CardGraderTool() {
             measureLines: measureLinesRef.current, currentStep: step,
         }));
         setLastInteractionCoords(prev => ({ ...prev, [draggingLineId]: { x: clientX, y: clientY } }));
-    } else if (step === 'measure' && isGeneralDragging) {
-        // 新增: 處理一般拖曳時的放大鏡更新
-        if (magnifierTimeoutRef.current) { clearTimeout(magnifierTimeoutRef.current); magnifierTimeoutRef.current = null; }
-        
-        setMagnifier(prev => ({ 
-            ...prev, visible: true, isTrackingMouse: true, 
-            targetX: clientX, targetY: clientY, imgRect: imgRect,
-            measureLines: measureLinesRef.current, currentStep: step,
-        }));
     }
-  }, [step, activePointIndex, draggingLineId, isGeneralDragging, cropPoints, getLiveImageRect, showFixedMagnifierAt]); 
+  }, [step, activePointIndex, draggingLineId, isGeneralDragging, cropPoints, getLiveImageRect]); 
 
   const handleGlobalUp = useCallback(() => {
+    // 清除長按計時器
+    if (longPressTimerRef.current) {
+        clearTimeout(longPressTimerRef.current);
+        longPressTimerRef.current = null;
+    }
+
     const wasCropDragging = activePointIndex !== null;
     const wasLineDragging = draggingLineId !== null;
     const wasGeneralDragging = isGeneralDragging;
@@ -726,7 +778,7 @@ function CardGraderTool() {
   useEffect(() => {
     window.addEventListener('mousemove', handleGlobalMove);
     window.addEventListener('mouseup', handleGlobalUp);
-    // 使用 passive: false 以允許在需要時 preventDefault (這裡主要依靠 touch-action css 控制)
+    // 使用 passive: false 以允許在需要時 preventDefault
     window.addEventListener('touchmove', handleGlobalTouchMove, { passive: false });
     window.addEventListener('touchend', handleGlobalUp);
     return () => {
@@ -738,8 +790,13 @@ function CardGraderTool() {
   }, [handleGlobalMove, handleGlobalUp]);
 
   const handleGlobalTouchMove = (e) => {
+     // 如果正在拖曳點、線或長按中，阻止預設滾動
      if(activePointIndex !== null || draggingLineId !== null || isGeneralDragging) {
-         e.preventDefault(); handleGlobalMove(e);
+         if (e.cancelable) e.preventDefault(); 
+         handleGlobalMove(e);
+     } else {
+         // 即使沒在拖曳，也要檢查是否要取消長按
+         handleGlobalMove(e);
      }
   };
 
@@ -1061,22 +1118,27 @@ function CardGraderTool() {
   const handleBackToCrop = () => { setStep('crop'); setSelectedLineId(null); setProcessedImage(null); };
   
   const isImageStep = step === 'crop' || step === 'measure';
-  // 修改：一律使用 items-start，避免強制置中導致手機版頂部被遮擋
-  const mainClass = `flex-1 relative w-full overflow-auto select-none p-2 md:p-6 flex justify-center items-start`; 
+  
+  // 修改：針對手機版，若在非 upload 步驟，Header 會隱藏，所以這裡只在 upload 步驟需要 padding
+  // 修改 Layout 邏輯：
+  // 1. h-screen 固定高度，避免瀏覽器捲動
+  // 2. main flex-1 overflow-hidden，圖片在內部 contain 縮放
+  // 3. footer 固定在底部
+  const mainClass = `flex-1 relative w-full overflow-hidden select-none bg-gray-800/50 flex items-center justify-center`; 
   
   // Crop step active point for coordinates display
   const activePt = lastActivePointIndex !== null ? cropPoints[lastActivePointIndex] : null;
 
   return (
     <div className="h-screen bg-gray-950 text-white font-sans flex flex-col overflow-hidden">
-      <header className="bg-gray-900 border-b border-gray-800 h-12 flex items-center justify-between px-4 shrink-0 z-50">
-        <div className="flex items-center gap-2"><Ruler className="text-blue-400" size={18} /><span className="font-bold text-sm md:text-base bg-gradient-to-r from-blue-400 to-purple-400 bg-clip-text text-transparent">PTCG Grade (v1.0.1)</span></div>
+      {/* 修正：在非 upload 步驟時，手機版隱藏 Header */}
+      <header className={`bg-gray-900 border-b border-gray-800 h-12 flex items-center justify-between px-4 shrink-0 z-50 ${step !== 'upload' ? 'hidden md:flex' : 'flex'}`}>
+        <div className="flex items-center gap-2"><Ruler className="text-blue-400" size={18} /><span className="font-bold text-sm md:text-base bg-gradient-to-r from-blue-400 to-purple-400 bg-clip-text text-transparent">PTCG Grade (v1.0.0)</span></div>
         <div className="flex items-center gap-2 text-xs">{step !== 'upload' && (<button onClick={handleReset} className="hover:text-white text-gray-400 flex items-center gap-1"><RefreshCw size={12}/> 重置</button>)}</div>
       </header>
       <main className={mainClass}>
         {step === 'upload' && (
-             // 修改：在手機版增加 pt-12 並使用 justify-start，確保不被 Header 遮擋；電腦版則恢復置中
-             <div className="flex-1 flex flex-col items-center justify-start pt-12 md:justify-center md:pt-0 w-full max-w-4xl gap-6 p-6">
+             <div className="flex-1 flex flex-col items-center justify-start pt-12 md:justify-center md:pt-0 w-full max-w-4xl gap-6 p-6 overflow-y-auto">
                  
                  {/* 狀態提示：如果已載入 JSON */}
                  {pendingProjectData && (
@@ -1126,15 +1188,25 @@ function CardGraderTool() {
              </div>
         )}
         {(step === 'crop' || step === 'measure') && (
-            <div className={`flex-shrink-0 select-none ${step === 'measure' ? 'max-h-[85vh] overflow-y-auto bg-gray-800 rounded-xl p-2 w-fit max-w-full' : 'relative w-fit h-fit'}`} ref={containerRef}>
-                <div className="relative w-fit h-fit">
-                    {/* *** 關鍵修復：補回 BASE_TARGET_WIDTH 的定義後，這裡就不會出錯了 *** */}
-                    <img ref={imgRef} src={step === 'crop' ? originalImage?.src : processedImage?.src} alt="Work" className="object-contain pointer-events-none shadow-2xl" style={step === 'crop' ? { maxWidth: `${BASE_TARGET_WIDTH}px`, maxHeight: '80vh' } : (processedImage ? { width: `${processedImage.naturalWidth}px`, height: 'auto' } : {})} />
+            // 修正：這裡移除 overflow-auto，改用 object-contain 來確保圖片適應螢幕，不需捲動
+            // 只有當圖片本身比例過長時，才會留白，但不會溢出
+            <div className={`relative w-full h-full flex items-center justify-center p-2 md:p-4`} ref={containerRef}>
+                <div className="relative max-w-full max-h-full aspect-auto flex items-center justify-center">
+                    <img 
+                        ref={imgRef} 
+                        src={step === 'crop' ? originalImage?.src : processedImage?.src} 
+                        alt="Work" 
+                        className="max-w-full max-h-full object-contain pointer-events-none shadow-2xl" 
+                        // 移除 style 中的固定寬度限制，改由 CSS 控制 RWD
+                        style={{
+                           maxWidth: '100%',
+                           maxHeight: '100%'
+                        }}
+                    />
                     
-                    {/* 改良後的放大鏡面板: 可收折 */}
-                    {/* 這裡的 z-index 調整為 110，高於放大鏡的 100 */}
+                    {/* 電腦版保留側邊放大鏡面板 (手機版已移至底部) */}
                     {(step === 'crop' || step === 'measure') && (
-                        <div className={`fixed right-2 top-1/2 transform -translate-y-1/2 bg-gray-800/90 backdrop-blur-sm rounded-lg shadow-xl z-[110] flex flex-col gap-2 border border-gray-700 transition-all duration-300 ${isMagnifierPanelCollapsed ? 'p-2 w-10' : 'p-3'}`}>
+                        <div className={`hidden md:flex fixed right-4 top-1/2 transform -translate-y-1/2 bg-gray-800/90 backdrop-blur-sm rounded-lg shadow-xl z-[110] flex-col gap-2 border border-gray-700 transition-all duration-300 ${isMagnifierPanelCollapsed ? 'p-2 w-10' : 'p-3'}`}>
                              <button 
                                 onClick={() => setIsMagnifierPanelCollapsed(!isMagnifierPanelCollapsed)}
                                 className="self-end text-gray-400 hover:text-white mb-1 focus:outline-none"
@@ -1170,14 +1242,16 @@ function CardGraderTool() {
                             getImageContainerRect={getLiveImageRect} 
                             getScreenCoords={getScreenCoords} 
                             activePointIndex={activePointIndex}
-                            lastActivePointIndex={lastActivePointIndex} // 傳入最後操作的點
+                            lastActivePointIndex={lastActivePointIndex} 
                             handleCropDragStart={handleCropDragStart} 
                             imgRef={imgRef} 
                             key={`crop-overlay-${coordsKey}`} 
                         />
                     )}
                     {step === 'measure' && processedImage && (
-                        // *** 新增事件監聽：在圖片容器上監聽 MouseDown 和 TouchStart，觸發一般放大鏡檢查 ***
+                        // *** 修改事件監聽 ***
+                        // onTouchStart: 觸發長按邏輯
+                        // onMouseDown: 維持電腦版點擊即觸發
                         <div 
                             className="absolute inset-0 w-full h-full pointer-events-auto cursor-crosshair"
                             onMouseDown={handleGeneralMouseDown}
@@ -1199,54 +1273,127 @@ function CardGraderTool() {
         )}
       </main>
       <Magnifier magnifierState={{...magnifier, cropPoints: cropPoints, measureLines: measureLines, currentStep: step}} zoom={zoomLevel} cardImage={cardImageForMagnifier}/>
-      {/* 關鍵修正：
-         1. 移除 footer 本身的 z-[120]，保留 relative 以維持佈局。
-         2. 將 z-[120] 移至 footer 內部的內容 div，這樣按鈕會在放大鏡 (z-100) 之上。
-         3. Footer 的背景 (bg-gray-900) 因為在 footer 標籤上且無 z-index，預設會低於放大鏡。
-         結果：放大鏡會浮在 Footer 背景之上，但在按鈕之下。
-      */}
-      <footer className="bg-gray-900 border-t border-gray-800 p-3 shrink-0 relative">
+      
+      {/* 修正 Footer: 使用 relative z-[120] 確保層級正確 */}
+      <footer className="bg-gray-900 border-t border-gray-800 p-2 md:p-3 shrink-0 relative">
         <div className="max-w-4xl mx-auto w-full relative z-[120]">
             {step === 'crop' && (
-                <div className="flex flex-col md:flex-row items-center justify-between gap-3">
-                     <div className="flex flex-col gap-1 w-full md:w-auto">
+                // 改用 grid 佈局以適應手機版
+                <div className="grid grid-cols-[1fr_auto] md:flex md:items-center md:justify-between gap-3">
+                     
+                     {/* 左側資訊 (手機版隱藏詳細說明，只留關鍵字) */}
+                     <div className="hidden md:flex flex-col gap-1 w-full md:w-auto">
                         <div className="text-gray-400 text-xs md:text-sm"><span className="text-green-400 font-bold">步驟 1:</span> 拖曳四個綠點至卡牌角落</div>
                         <div className="text-gray-500 text-[10px]">點擊任一綠點即可進行微調</div>
                      </div>
                      
-                     {/* 新增: 校正微調控制器 */}
-                     <div className="flex items-center gap-2 bg-gray-800/50 p-1.5 rounded-lg border border-gray-700">
-                         <div className="flex flex-col items-center justify-center gap-1">
-                             <button onClick={() => nudgeCropPoint(0, -1)} disabled={lastActivePointIndex === null} className={`w-8 h-8 rounded bg-gray-700 flex items-center justify-center ${lastActivePointIndex !== null ? 'hover:bg-blue-600 text-white' : 'opacity-30 cursor-not-allowed'}`}><ChevronUp size={16}/></button>
-                             <div className="flex gap-1">
-                                 <button onClick={() => nudgeCropPoint(-1, 0)} disabled={lastActivePointIndex === null} className={`w-8 h-8 rounded bg-gray-700 flex items-center justify-center ${lastActivePointIndex !== null ? 'hover:bg-blue-600 text-white' : 'opacity-30 cursor-not-allowed'}`}><ChevronLeft size={16}/></button>
-                                 <div className="w-8 h-8 flex items-center justify-center text-blue-400">
-                                     {lastActivePointIndex !== null ? <Move size={16} /> : <MousePointerClick size={16} className="text-gray-600"/>}
-                                 </div>
-                                 <button onClick={() => nudgeCropPoint(1, 0)} disabled={lastActivePointIndex === null} className={`w-8 h-8 rounded bg-gray-700 flex items-center justify-center ${lastActivePointIndex !== null ? 'hover:bg-blue-600 text-white' : 'opacity-30 cursor-not-allowed'}`}><ChevronRight size={16}/></button>
-                             </div>
-                             <button onClick={() => nudgeCropPoint(0, 1)} disabled={lastActivePointIndex === null} className={`w-8 h-8 rounded bg-gray-700 flex items-center justify-center ${lastActivePointIndex !== null ? 'hover:bg-blue-600 text-white' : 'opacity-30 cursor-not-allowed'}`}><ChevronDown size={16}/></button>
+                     {/* 控制器區塊 (合併微調與放大鏡控制) */}
+                     <div className="flex items-center gap-2 overflow-x-auto no-scrollbar">
+                         {/* 重置按鈕 (手機版專用) */}
+                         <button onClick={handleReset} className="md:hidden p-2 rounded-lg bg-gray-800 border border-gray-700 text-gray-400 hover:text-white" title="重置">
+                             <RotateCcw size={18}/>
+                         </button>
+
+                         {/* 放大鏡控制 (手機版移至此處) */}
+                         <div className="md:hidden flex items-center bg-gray-800 border border-gray-700 rounded-lg p-1">
+                             <button onClick={() => cycleZoom()} className="px-2 py-1 text-xs font-mono text-blue-400 min-w-[3rem] text-center border-r border-gray-700">
+                                 {zoomLevel.toFixed(1)}x
+                             </button>
+                             <button onClick={() => handleZoomChange(zoomOptions[Math.min(zoomOptions.length-1, zoomOptions.indexOf(zoomLevel)+1)])} className="p-1 text-gray-400 hover:text-white">
+                                 <ZoomIn size={16}/>
+                             </button>
                          </div>
-                         <div className="text-[10px] text-gray-500 w-24 text-center leading-tight">
-                             {activePt ? (
-                                 <>
-                                    <div>微調選中點</div>
-                                    <div className="font-mono text-xs text-blue-300">
-                                        {/* *** 關鍵修改：顯示當前選中綠點的座標 *** */}
-                                        {`X:${(activePt.x * 100).toFixed(1)}% Y:${(activePt.y * 100).toFixed(1)}%`}
-                                    </div>
-                                 </>
-                             ) : '請先點選綠點'}
+
+                         {/* 微調十字鍵 */}
+                         <div className="flex items-center gap-1 bg-gray-800/50 p-1 rounded-lg border border-gray-700">
+                             <div className="flex flex-col items-center justify-center gap-0.5">
+                                 <button onClick={() => nudgeCropPoint(0, -1)} disabled={lastActivePointIndex === null} className={`w-8 h-6 rounded-t bg-gray-700 flex items-center justify-center ${lastActivePointIndex !== null ? 'active:bg-blue-600 text-white' : 'opacity-30 cursor-not-allowed'}`}><ChevronUp size={14}/></button>
+                                 <div className="flex gap-0.5">
+                                     <button onClick={() => nudgeCropPoint(-1, 0)} disabled={lastActivePointIndex === null} className={`w-8 h-8 rounded-l bg-gray-700 flex items-center justify-center ${lastActivePointIndex !== null ? 'active:bg-blue-600 text-white' : 'opacity-30 cursor-not-allowed'}`}><ChevronLeft size={14}/></button>
+                                     <div className="w-8 h-8 flex items-center justify-center bg-gray-800 text-blue-400 border border-gray-700 rounded">
+                                         {lastActivePointIndex !== null ? <Move size={14} /> : <MousePointerClick size={14} className="text-gray-600"/>}
+                                     </div>
+                                     <button onClick={() => nudgeCropPoint(1, 0)} disabled={lastActivePointIndex === null} className={`w-8 h-8 rounded-r bg-gray-700 flex items-center justify-center ${lastActivePointIndex !== null ? 'active:bg-blue-600 text-white' : 'opacity-30 cursor-not-allowed'}`}><ChevronRight size={14}/></button>
+                                 </div>
+                                 <button onClick={() => nudgeCropPoint(0, 1)} disabled={lastActivePointIndex === null} className={`w-8 h-6 rounded-b bg-gray-700 flex items-center justify-center ${lastActivePointIndex !== null ? 'active:bg-blue-600 text-white' : 'opacity-30 cursor-not-allowed'}`}><ChevronDown size={14}/></button>
+                             </div>
                          </div>
                      </div>
 
-                     <button onClick={performWarpAndProceed} className="bg-green-600 hover:bg-green-500 text-white px-6 py-2 rounded-full font-bold shadow-lg flex items-center gap-2 active:scale-95 transition-all w-full md:w-auto justify-center">校正並繼續 <ArrowRight size={18}/></button>
+                     {/* 下一步按鈕 */}
+                     <button onClick={performWarpAndProceed} className="col-span-2 md:col-span-1 bg-green-600 hover:bg-green-500 text-white px-4 py-3 md:py-2 rounded-xl font-bold shadow-lg flex items-center justify-center gap-2 active:scale-95 transition-all w-full md:w-auto">
+                         <span className="md:hidden">下一步</span>
+                         <span className="hidden md:inline">校正並繼續</span> 
+                         <ArrowRight size={18}/>
+                     </button>
                 </div>
             )}
             {step === 'measure' && (
-                <div className="flex flex-col gap-3">
-                    <div className="flex items-center justify-between"><button onClick={handleBackToCrop} className="text-gray-500 hover:text-white px-2 py-1 flex items-center gap-1 text-xs"><ArrowLeft size={14}/> 重調四角 (保留上次位置)</button><div className="flex items-center gap-2"><button onClick={() => nudgeLine(-1)} disabled={!selectedLineId} className={`w-10 h-10 rounded-full flex items-center justify-center border transition-colors ${selectedLineId ? 'bg-gray-800 hover:bg-gray-700 border-gray-700 text-white' : 'bg-gray-900 border-gray-800 text-gray-600 cursor-not-allowed'}`}>{(selectedLineId?.includes('Top') || selectedLineId?.includes('Bottom')) ? <ChevronUp size={20}/> : <ChevronLeft size={20}/>}</button><div className="text-center w-24"><div className="text-[10px] text-gray-500 uppercase tracking-wider">微調</div><div className="text-xs font-bold text-blue-300 truncate">{selectedLineId ? (<><div>{selectedLineId.includes('outer') ? '藍線 (卡邊)' : '紅線 (圖案)'}</div><div>{measureLines[selectedLineId].toFixed(2)}%</div></>) : '請點選虛線'}</div></div><button onClick={() => nudgeLine(1)} disabled={!selectedLineId} className={`w-10 h-10 rounded-full flex items-center justify-center border transition-colors ${selectedLineId ? 'bg-gray-800 hover:bg-gray-700 border-gray-700 text-white' : 'bg-gray-900 border-gray-800 text-gray-600 cursor-not-allowed'}`}>{(selectedLineId?.includes('Top') || selectedLineId?.includes('Bottom')) ? <ChevronDown size={20}/> : <ChevronRight size={20}/>}</button></div><div className="flex justify-end gap-2"><button onClick={handleExportJSON} className="bg-blue-600 hover:bg-blue-500 text-white p-2 rounded-lg shadow-sm transition-colors" title="儲存專案檔 (.json)"><FileJson size={20}/></button><button onClick={downloadResultImage} className="bg-emerald-600 hover:bg-emerald-500 text-white p-2 rounded-lg shadow-sm transition-colors" title="下載結果圖 (.png)"><ImageIcon size={20}/></button></div></div>
-                    <div className="bg-black/40 rounded-lg p-2 flex items-center justify-around border border-gray-700"><div className="flex flex-col items-center w-1/2 border-r border-gray-700"><span className="text-[10px] text-gray-400 uppercase">左右比例 (H)</span><div className="flex items-baseline gap-1"><span className={`text-lg font-bold ${Math.abs(results.h.left - results.h.right) <= 10 ? 'text-green-400' : 'text-yellow-400'}`}>{results.h.left.toFixed(1)} : {results.h.right.toFixed(1)}</span></div></div><div className="flex flex-col items-center w-1/2"><span className="text-[10px] text-gray-400 uppercase">上下比例 (V)</span><div className="flex items-baseline gap-1"><span className={`text-lg font-bold ${Math.abs(results.v.top - results.v.bottom) <= 10 ? 'text-green-400' : 'text-yellow-400'}`}>{results.v.top.toFixed(1)} : {results.v.bottom.toFixed(1)}</span></div></div></div>
+                <div className="flex flex-col gap-2">
+                    {/* 工具列 Row 1: 控制項 */}
+                    <div className="flex items-center justify-between gap-2">
+                        {/* 左側: 返回與重置 */}
+                        <div className="flex items-center gap-2">
+                            <button onClick={handleBackToCrop} className="p-2 bg-gray-800 rounded-lg text-gray-400 hover:text-white border border-gray-700" title="重調四角">
+                                <ArrowLeft size={18}/>
+                            </button>
+                            <button onClick={handleReset} className="md:hidden p-2 bg-gray-800 rounded-lg text-gray-400 hover:text-white border border-gray-700" title="全部重置">
+                                <RotateCcw size={18}/>
+                            </button>
+                        </div>
+
+                        {/* 中間: 縮放與微調 (手機版核心操作區) */}
+                        <div className="flex items-center gap-2 bg-gray-900/80 p-1 rounded-xl border border-gray-800 overflow-x-auto">
+                             {/* 縮放控制 */}
+                             <div className="flex items-center border-r border-gray-700 pr-2 mr-1">
+                                <button onClick={() => handleZoomChange(Math.max(0.2, zoomLevel - 0.5))} className="p-1.5 text-gray-400 active:text-white"><Minus size={14}/></button>
+                                <span className="text-xs font-mono text-blue-400 min-w-[2.5rem] text-center">{zoomLevel.toFixed(1)}x</span>
+                                <button onClick={() => handleZoomChange(Math.min(5, zoomLevel + 0.5))} className="p-1.5 text-gray-400 active:text-white"><Plus size={14}/></button>
+                             </div>
+
+                             {/* 線條微調 */}
+                             <div className="flex items-center gap-1">
+                                <button onClick={() => nudgeLine(-1)} disabled={!selectedLineId} className={`w-8 h-8 rounded flex items-center justify-center transition-colors ${selectedLineId ? 'bg-gray-700 text-white active:bg-blue-600' : 'bg-gray-800 text-gray-600'}`}>
+                                    {(selectedLineId?.includes('Top') || selectedLineId?.includes('Bottom')) ? <ChevronUp size={16}/> : <ChevronLeft size={16}/>}
+                                </button>
+                                <div className="text-center w-16 px-1">
+                                    <div className="text-[9px] text-gray-500 uppercase tracking-wider">微調</div>
+                                    <div className="text-[10px] font-bold text-blue-300 truncate">
+                                        {selectedLineId ? `${measureLines[selectedLineId].toFixed(1)}%` : '--'}
+                                    </div>
+                                </div>
+                                <button onClick={() => nudgeLine(1)} disabled={!selectedLineId} className={`w-8 h-8 rounded flex items-center justify-center transition-colors ${selectedLineId ? 'bg-gray-700 text-white active:bg-blue-600' : 'bg-gray-800 text-gray-600'}`}>
+                                    {(selectedLineId?.includes('Top') || selectedLineId?.includes('Bottom')) ? <ChevronDown size={16}/> : <ChevronRight size={16}/>}
+                                </button>
+                             </div>
+                        </div>
+
+                        {/* 右側: 動作 */}
+                        <div className="flex items-center gap-2">
+                            <button onClick={handleExportJSON} className="bg-blue-600/90 text-white p-2 rounded-lg shadow-sm" title="儲存專案">
+                                <FileJson size={18}/>
+                            </button>
+                            <button onClick={downloadResultImage} className="bg-emerald-600/90 text-white p-2 rounded-lg shadow-sm" title="下載圖片">
+                                <ImageIcon size={18}/>
+                            </button>
+                        </div>
+                    </div>
+
+                    {/* 數據列 Row 2: 結果顯示 (更緊湊) */}
+                    <div className="bg-black/60 rounded-lg py-1.5 px-3 flex items-center justify-between border border-gray-700 text-xs md:text-sm">
+                        <div className="flex flex-col items-center w-1/2 border-r border-gray-700 pr-2">
+                            <span className="text-[9px] text-gray-400 uppercase tracking-widest">左右 (H)</span>
+                            <span className={`font-bold font-mono ${Math.abs(results.h.left - results.h.right) <= 2 ? 'text-green-400' : 'text-yellow-400'}`}>
+                                {results.h.left.toFixed(1)} : {results.h.right.toFixed(1)}
+                            </span>
+                        </div>
+                        <div className="flex flex-col items-center w-1/2 pl-2">
+                            <span className="text-[9px] text-gray-400 uppercase tracking-widest">上下 (V)</span>
+                            <span className={`font-bold font-mono ${Math.abs(results.v.top - results.v.bottom) <= 2 ? 'text-green-400' : 'text-yellow-400'}`}>
+                                {results.v.top.toFixed(1)} : {results.v.bottom.toFixed(1)}
+                            </span>
+                        </div>
+                    </div>
                 </div>
             )}
         </div>
