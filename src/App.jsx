@@ -784,6 +784,14 @@ function CardGraderTool() {
   };
   const results = calculateResults();
 
+  // Helper: Determine nudge pixels based on zoom level
+  const getNudgePixels = (zoom) => {
+    if (zoom >= 5) return 1;
+    if (zoom >= 3) return 2;
+    if (zoom >= 2) return 3; // 2x to 2.9x
+    return 5; // < 2x (including 1x and below)
+  };
+
   const nudgeLine = (val) => {
     if (!selectedLineId || !processedImage) return;
     const lineIdToNudge = selectedLineId;
@@ -791,36 +799,38 @@ function CardGraderTool() {
     if(!imgRect) return;
 
     const isHLine = lineIdToNudge.includes('Top') || lineIdToNudge.includes('Bottom');
-    const pixelSize = isHLine ? imgRect.height : imgRect.width; 
+    
+    // *** 關鍵修復：使用圖片的【原始像素】(Natural Dimensions) 來計算移動距離 ***
+    // 這樣無論螢幕顯示多小，按一下就是移動 "1 個真實像素" (或根據倍率調整的像素)
+    const pixelSize = isHLine ? processedImage.naturalHeight : processedImage.naturalWidth;
     const pxPct = (1 / pixelSize) * 100;
     
-    // *** 關鍵修復：先計算新值，再更新狀態與放大鏡位置 ***
+    // 根據 zoomLevel 動態調整移動距離
+    const pixels = getNudgePixels(zoomLevel);
+    
     const currentVal = measureLines[lineIdToNudge];
-    const newVal = Math.max(0, Math.min(100, currentVal + (val * pxPct)));
+    // 移動量 = 方向 * 像素數 * 每像素百分比
+    const newVal = Math.max(0, Math.min(100, currentVal + (val * pixels * pxPct)));
     
     setMeasureLines(prev => ({
         ...prev,
         [lineIdToNudge]: newVal
     }));
     
-    // 直接使用新值計算放大鏡位置，確保同步
-    // *** 修正: 使用 lastInteractionCoords 來決定「非移動軸」的位置，避免跳回中心 ***
+    // 計算放大鏡位置 (維持之前的邏輯：鎖定軸向)
     let targetX, targetY;
     const lastCoords = lastInteractionCoords[lineIdToNudge];
 
     if (isHLine) {
-        // 水平線：保留上一次的 X 座標（或中心），更新 Y 座標
         const lastScreenX = lastCoords ? lastCoords.x : (imgRect.left + imgRect.width / 2);
-        targetX = Math.max(imgRect.left, Math.min(imgRect.right, lastScreenX)); // 確保 X 不會飛出圖片外
+        targetX = Math.max(imgRect.left, Math.min(imgRect.right, lastScreenX));
         targetY = imgRect.top + imgRect.height * (newVal / 100);
     } else {
-        // 垂直線：保留上一次的 Y 座標（或中心），更新 X 座標
         const lastScreenY = lastCoords ? lastCoords.y : (imgRect.top + imgRect.height / 2);
         targetX = imgRect.left + imgRect.width * (newVal / 100);
-        targetY = Math.max(imgRect.top, Math.min(imgRect.bottom, lastScreenY)); // 確保 Y 不會飛出圖片外
+        targetY = Math.max(imgRect.top, Math.min(imgRect.bottom, lastScreenY));
     }
     
-    // 更新 lastInteractionCoords，這樣連續點擊時位置不會跑掉
     setLastInteractionCoords(prev => ({
         ...prev,
         [lineIdToNudge]: { x: targetX, y: targetY }
@@ -831,13 +841,17 @@ function CardGraderTool() {
   
   // 新增: 微調裁切點 (Crop Points)
   const nudgeCropPoint = (dx, dy) => {
-      if (lastActivePointIndex === null || !imgRef.current) return;
-      const rect = imgRef.current.getBoundingClientRect();
-      if (!rect || rect.width === 0) return;
+      // *** 關鍵修復：使用【原圖尺寸】(Original Card Dims) 來計算移動距離 ***
+      if (lastActivePointIndex === null || !originalCardDims.w) return;
+      
+      const rect = imgRef.current?.getBoundingClientRect(); // 僅用於放大鏡定位
 
-      // 將像素移動量轉換為 0-1 的比例
-      const normDx = dx / rect.width;
-      const normDy = dy / rect.height;
+      // 根據 zoomLevel 動態調整移動距離
+      const pixels = getNudgePixels(zoomLevel);
+
+      // 將移動量 (像素 * 方向) 轉換為 0-1 的比例
+      const normDx = (dx * pixels) / originalCardDims.w;
+      const normDy = (dy * pixels) / originalCardDims.h;
 
       setCropPoints(prev => {
           const newPoints = [...prev];
@@ -849,12 +863,14 @@ function CardGraderTool() {
           return newPoints;
       });
 
-      // 手動計算更新後的螢幕位置以顯示放大鏡
-      const currentPt = cropPoints[lastActivePointIndex];
-      // 注意: 這裡我們預測更新後的位置，因為 setState 是非同步的
-      const targetX = rect.left + (currentPt.x + normDx) * rect.width;
-      const targetY = rect.top + (currentPt.y + normDy) * rect.height;
-      showFixedMagnifierAt(targetX, targetY);
+      // 預測更新後的螢幕位置以顯示放大鏡
+      if (rect) {
+          const currentPt = cropPoints[lastActivePointIndex];
+          // 注意：這裡使用 currentPt 加上變動量預測新位置
+          const targetX = rect.left + (currentPt.x + normDx) * rect.width;
+          const targetY = rect.top + (currentPt.y + normDy) * rect.height;
+          showFixedMagnifierAt(targetX, targetY);
+      }
   };
   
   const handleZoomChange = (newZoom) => {
@@ -982,6 +998,9 @@ function CardGraderTool() {
   const isImageStep = step === 'crop' || step === 'measure';
   // 修改：一律使用 items-start，避免強制置中導致手機版頂部被遮擋
   const mainClass = `flex-1 relative w-full overflow-auto select-none p-2 md:p-6 flex justify-center items-start`; 
+  
+  // Crop step active point for coordinates display
+  const activePt = lastActivePointIndex !== null ? cropPoints[lastActivePointIndex] : null;
 
   return (
     <div className="h-screen bg-gray-950 text-white font-sans flex flex-col overflow-hidden">
@@ -1136,8 +1155,16 @@ function CardGraderTool() {
                              </div>
                              <button onClick={() => nudgeCropPoint(0, 1)} disabled={lastActivePointIndex === null} className={`w-8 h-8 rounded bg-gray-700 flex items-center justify-center ${lastActivePointIndex !== null ? 'hover:bg-blue-600 text-white' : 'opacity-30 cursor-not-allowed'}`}><ChevronDown size={16}/></button>
                          </div>
-                         <div className="text-[10px] text-gray-500 w-16 text-center leading-tight">
-                             {lastActivePointIndex !== null ? '微調選中點' : '請先點選綠點'}
+                         <div className="text-[10px] text-gray-500 w-24 text-center leading-tight">
+                             {activePt ? (
+                                 <>
+                                    <div>微調選中點</div>
+                                    <div className="font-mono text-xs text-blue-300">
+                                        {/* *** 關鍵修改：顯示當前選中綠點的座標 *** */}
+                                        {`X:${(activePt.x * 100).toFixed(1)}% Y:${(activePt.y * 100).toFixed(1)}%`}
+                                    </div>
+                                 </>
+                             ) : '請先點選綠點'}
                          </div>
                      </div>
 
@@ -1146,7 +1173,7 @@ function CardGraderTool() {
             )}
             {step === 'measure' && (
                 <div className="flex flex-col gap-3">
-                    <div className="flex items-center justify-between"><button onClick={handleBackToCrop} className="text-gray-500 hover:text-white px-2 py-1 flex items-center gap-1 text-xs"><ArrowLeft size={14}/> 重調四角 (保留上次位置)</button><div className="flex items-center gap-2"><button onClick={() => nudgeLine(-1)} disabled={!selectedLineId} className={`w-10 h-10 rounded-full flex items-center justify-center border transition-colors ${selectedLineId ? 'bg-gray-800 hover:bg-gray-700 border-gray-700 text-white' : 'bg-gray-900 border-gray-800 text-gray-600 cursor-not-allowed'}`}>{(selectedLineId?.includes('Top') || selectedLineId?.includes('Bottom')) ? <ChevronUp size={20}/> : <ChevronLeft size={20}/>}</button><div className="text-center w-24"><div className="text-[10px] text-gray-500 uppercase tracking-wider">微調</div><div className="text-xs font-bold text-blue-300 truncate">{selectedLineId ? (selectedLineId.includes('outer') ? '藍線 (卡邊)' : '紅線 (圖案)') : '請點選虛線'}</div></div><button onClick={() => nudgeLine(1)} disabled={!selectedLineId} className={`w-10 h-10 rounded-full flex items-center justify-center border transition-colors ${selectedLineId ? 'bg-gray-800 hover:bg-gray-700 border-gray-700 text-white' : 'bg-gray-900 border-gray-800 text-gray-600 cursor-not-allowed'}`}>{(selectedLineId?.includes('Top') || selectedLineId?.includes('Bottom')) ? <ChevronDown size={20}/> : <ChevronRight size={20}/>}</button></div><div className="flex justify-end gap-2"><button onClick={handleExportJSON} className="bg-blue-600 hover:bg-blue-500 text-white p-2 rounded-lg shadow-sm transition-colors" title="儲存專案檔 (.json)"><FileJson size={20}/></button><button onClick={downloadResultImage} className="bg-emerald-600 hover:bg-emerald-500 text-white p-2 rounded-lg shadow-sm transition-colors" title="下載結果圖 (.png)"><ImageIcon size={20}/></button></div></div>
+                    <div className="flex items-center justify-between"><button onClick={handleBackToCrop} className="text-gray-500 hover:text-white px-2 py-1 flex items-center gap-1 text-xs"><ArrowLeft size={14}/> 重調四角 (保留上次位置)</button><div className="flex items-center gap-2"><button onClick={() => nudgeLine(-1)} disabled={!selectedLineId} className={`w-10 h-10 rounded-full flex items-center justify-center border transition-colors ${selectedLineId ? 'bg-gray-800 hover:bg-gray-700 border-gray-700 text-white' : 'bg-gray-900 border-gray-800 text-gray-600 cursor-not-allowed'}`}>{(selectedLineId?.includes('Top') || selectedLineId?.includes('Bottom')) ? <ChevronUp size={20}/> : <ChevronLeft size={20}/>}</button><div className="text-center w-24"><div className="text-[10px] text-gray-500 uppercase tracking-wider">微調</div><div className="text-xs font-bold text-blue-300 truncate">{selectedLineId ? (<><div>{selectedLineId.includes('outer') ? '藍線 (卡邊)' : '紅線 (圖案)'}</div><div>{measureLines[selectedLineId].toFixed(2)}%</div></>) : '請點選虛線'}</div></div><button onClick={() => nudgeLine(1)} disabled={!selectedLineId} className={`w-10 h-10 rounded-full flex items-center justify-center border transition-colors ${selectedLineId ? 'bg-gray-800 hover:bg-gray-700 border-gray-700 text-white' : 'bg-gray-900 border-gray-800 text-gray-600 cursor-not-allowed'}`}>{(selectedLineId?.includes('Top') || selectedLineId?.includes('Bottom')) ? <ChevronDown size={20}/> : <ChevronRight size={20}/>}</button></div><div className="flex justify-end gap-2"><button onClick={handleExportJSON} className="bg-blue-600 hover:bg-blue-500 text-white p-2 rounded-lg shadow-sm transition-colors" title="儲存專案檔 (.json)"><FileJson size={20}/></button><button onClick={downloadResultImage} className="bg-emerald-600 hover:bg-emerald-500 text-white p-2 rounded-lg shadow-sm transition-colors" title="下載結果圖 (.png)"><ImageIcon size={20}/></button></div></div>
                     <div className="bg-black/40 rounded-lg p-2 flex items-center justify-around border border-gray-700"><div className="flex flex-col items-center w-1/2 border-r border-gray-700"><span className="text-[10px] text-gray-400 uppercase">左右比例 (H)</span><div className="flex items-baseline gap-1"><span className={`text-lg font-bold ${Math.abs(results.h.left - results.h.right) <= 10 ? 'text-green-400' : 'text-yellow-400'}`}>{results.h.left.toFixed(1)} : {results.h.right.toFixed(1)}</span></div></div><div className="flex flex-col items-center w-1/2"><span className="text-[10px] text-gray-400 uppercase">上下比例 (V)</span><div className="flex items-baseline gap-1"><span className={`text-lg font-bold ${Math.abs(results.v.top - results.v.bottom) <= 10 ? 'text-green-400' : 'text-yellow-400'}`}>{results.v.top.toFixed(1)} : {results.v.bottom.toFixed(1)}</span></div></div></div>
                 </div>
             )}
