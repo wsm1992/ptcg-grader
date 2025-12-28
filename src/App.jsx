@@ -832,7 +832,7 @@ function CardGraderTool() {
   return (
     <div className="h-screen bg-gray-950 text-white font-sans flex flex-col overflow-hidden">
       <header className="bg-gray-900 border-b border-gray-800 h-12 flex items-center justify-between px-4 shrink-0 z-50">
-        <div className="flex items-center gap-2"><Ruler className="text-blue-400" size={18} /><span className="font-bold text-sm md:text-base bg-gradient-to-r from-blue-400 to-purple-400 bg-clip-text text-transparent">PTCG Grade (虛線修復版 v22)</span></div>
+        <div className="flex items-center gap-2"><Ruler className="text-blue-400" size={18} /><span className="font-bold text-sm md:text-base bg-gradient-to-r from-blue-400 to-purple-400 bg-clip-text text-transparent">PTCG Grade (v1.0.0)</span></div>
         <div className="flex items-center gap-2 text-xs">{step !== 'upload' && (<button onClick={handleReset} className="hover:text-white text-gray-400 flex items-center gap-1"><RefreshCw size={12}/> 重置</button>)}</div>
       </header>
       <main className={mainClass}>
