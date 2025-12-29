@@ -142,8 +142,13 @@ function App() {
     const [lastActivePointIndex, setLastActivePointIndex] = useState(null);
     const [isGeneralDragging, setIsGeneralDragging] = useState(false);
     const [measureLines, setMeasureLines] = useState({ outerTop: 2, innerTop: 12, outerBottom: 98, innerBottom: 88, outerLeft: 3, innerLeft: 13, outerRight: 97, innerRight: 87 });
+    
+    // 使用 Ref 儲存會變動的座標數據，避免 useEffect 依賴導致監聽器反覆綁定
     const measureLinesRef = useRef(measureLines);
     useEffect(() => { measureLinesRef.current = measureLines; }, [measureLines]);
+    
+    const cropPointsRef = useRef(cropPoints);
+    useEffect(() => { cropPointsRef.current = cropPoints; }, [cropPoints]);
 
     const [selectedLineId, setSelectedLineId] = useState(null);
     const [draggingLineId, setDraggingLineId] = useState(null);
@@ -159,9 +164,9 @@ function App() {
         const imgRect = getLiveImageRect();
         if (!imgRect?.width) return;
         if (magnifierTimeoutRef.current) clearTimeout(magnifierTimeoutRef.current);
-        setMagnifier(p => ({ ...p, visible: true, isTrackingMouse: false, targetX: cx, targetY: cy, imgRect, currentStep: step, cropPoints, measureLines: measureLinesRef.current }));
+        setMagnifier(p => ({ ...p, visible: true, isTrackingMouse: false, targetX: cx, targetY: cy, imgRect, currentStep: step, cropPoints: cropPointsRef.current, measureLines: measureLinesRef.current }));
         magnifierTimeoutRef.current = setTimeout(() => setMagnifier(p => ({ ...p, visible: false })), 2000);
-    }, [step, cropPoints, getLiveImageRect]);
+    }, [step, getLiveImageRect]);
 
     const getLineScreenCenter = useCallback((id) => {
         if (!id || !processedImage) return null;
@@ -300,7 +305,10 @@ function App() {
 
         if (step === 'crop' && activePointIndex !== null) {
             if (magnifierTimeoutRef.current) clearTimeout(magnifierTimeoutRef.current);
-            const ncp = [...cropPoints]; ncp[activePointIndex] = { x: nx, y: ny }; setCropPoints(ncp);
+            // 使用 Ref 獲取最新的 cropPoints，避免依賴 cropPoints 導致 useCallback 改變
+            const ncp = [...cropPointsRef.current]; 
+            ncp[activePointIndex] = { x: nx, y: ny }; 
+            setCropPoints(ncp);
             setMagnifier(p => ({ ...p, visible: true, isTrackingMouse: true, targetX: cx, targetY: cy, imgRect: r, currentStep: step, cropPoints: ncp }));
         } else if (step === 'measure' && draggingLineId) {
             if (magnifierTimeoutRef.current) clearTimeout(magnifierTimeoutRef.current);
@@ -312,7 +320,7 @@ function App() {
             if (magnifierTimeoutRef.current) clearTimeout(magnifierTimeoutRef.current);
             setMagnifier(p => ({ ...p, visible: true, isTrackingMouse: true, targetX: cx, targetY: cy, imgRect: r, measureLines: measureLinesRef.current, currentStep: step }));
         }
-    }, [step, activePointIndex, draggingLineId, isGeneralDragging, cropPoints, getLiveImageRect]);
+    }, [step, activePointIndex, draggingLineId, isGeneralDragging, getLiveImageRect]); // 移除 cropPoints 依賴
 
     const handleGlobalUp = useCallback(() => {
         setActivePointIndex(null); setDraggingLineId(null); setIsGeneralDragging(false);
@@ -321,10 +329,25 @@ function App() {
     }, []);
 
     useEffect(() => {
-        window.addEventListener('mousemove', handleGlobalMove); window.addEventListener('mouseup', handleGlobalUp);
-        window.addEventListener('touchmove', e => { if(activePointIndex!==null||draggingLineId!==null||isGeneralDragging) e.preventDefault(); handleGlobalMove(e); }, { passive: false });
+        window.addEventListener('mousemove', handleGlobalMove); 
+        window.addEventListener('mouseup', handleGlobalUp);
+        
+        const touchOptions = { passive: false };
+        window.addEventListener('touchmove', e => { 
+            if(activePointIndex!==null||draggingLineId!==null||isGeneralDragging) e.preventDefault(); 
+            handleGlobalMove(e); 
+        }, touchOptions);
+        
         window.addEventListener('touchend', handleGlobalUp);
-        return () => { window.removeEventListener('mousemove', handleGlobalMove); window.removeEventListener('mouseup', handleGlobalUp); window.removeEventListener('touchmove', handleGlobalMove); window.removeEventListener('touchend', handleGlobalUp); };
+        window.addEventListener('touchcancel', handleGlobalUp); // 新增 touchcancel
+
+        return () => { 
+            window.removeEventListener('mousemove', handleGlobalMove); 
+            window.removeEventListener('mouseup', handleGlobalUp); 
+            window.removeEventListener('touchmove', handleGlobalMove); // 這裡 remove 的函數必須是同一個參考
+            window.removeEventListener('touchend', handleGlobalUp);
+            window.removeEventListener('touchcancel', handleGlobalUp);
+        };
     }, [handleGlobalMove, handleGlobalUp, activePointIndex, draggingLineId, isGeneralDragging]);
 
     const performWarpAndProceed = useCallback(async () => {
