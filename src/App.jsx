@@ -298,14 +298,14 @@ function App() {
 
     const handleGlobalMove = useCallback(e => {
         if (!containerRef.current) return;
-        const cx = e.touches?e.touches[0].clientX:e.clientX, cy = e.touches?e.touches[0].clientY:e.clientY;
+        const cx = e.touches ? e.touches[0].clientX : e.clientX;
+        const cy = e.touches ? e.touches[0].clientY : e.clientY;
         const r = getLiveImageRect();
         if (!r?.width) return;
         const nx = Math.max(0, Math.min(1, (cx - r.left)/r.width)), ny = Math.max(0, Math.min(1, (cy - r.top)/r.height));
 
         if (step === 'crop' && activePointIndex !== null) {
             if (magnifierTimeoutRef.current) clearTimeout(magnifierTimeoutRef.current);
-            // 使用 Ref 獲取最新的 cropPoints，避免依賴 cropPoints 導致 useCallback 改變
             const ncp = [...cropPointsRef.current]; 
             ncp[activePointIndex] = { x: nx, y: ny }; 
             setCropPoints(ncp);
@@ -320,7 +320,7 @@ function App() {
             if (magnifierTimeoutRef.current) clearTimeout(magnifierTimeoutRef.current);
             setMagnifier(p => ({ ...p, visible: true, isTrackingMouse: true, targetX: cx, targetY: cy, imgRect: r, measureLines: measureLinesRef.current, currentStep: step }));
         }
-    }, [step, activePointIndex, draggingLineId, isGeneralDragging, getLiveImageRect]); // 移除 cropPoints 依賴
+    }, [step, activePointIndex, draggingLineId, isGeneralDragging, getLiveImageRect]);
 
     const handleGlobalUp = useCallback(() => {
         setActivePointIndex(null); setDraggingLineId(null); setIsGeneralDragging(false);
@@ -329,22 +329,23 @@ function App() {
     }, []);
 
     useEffect(() => {
-        window.addEventListener('mousemove', handleGlobalMove); 
+        const handleWindowTouchMove = e => {
+            if (activePointIndex !== null || draggingLineId !== null || isGeneralDragging) e.preventDefault();
+            handleGlobalMove(e);
+        };
+
+        window.addEventListener('mousemove', handleGlobalMove);
         window.addEventListener('mouseup', handleGlobalUp);
         
-        const touchOptions = { passive: false };
-        window.addEventListener('touchmove', e => { 
-            if(activePointIndex!==null||draggingLineId!==null||isGeneralDragging) e.preventDefault(); 
-            handleGlobalMove(e); 
-        }, touchOptions);
+        window.addEventListener('touchmove', handleWindowTouchMove, { passive: false });
         
         window.addEventListener('touchend', handleGlobalUp);
-        window.addEventListener('touchcancel', handleGlobalUp); // 新增 touchcancel
+        window.addEventListener('touchcancel', handleGlobalUp);
 
         return () => { 
             window.removeEventListener('mousemove', handleGlobalMove); 
             window.removeEventListener('mouseup', handleGlobalUp); 
-            window.removeEventListener('touchmove', handleGlobalMove); // 這裡 remove 的函數必須是同一個參考
+            window.removeEventListener('touchmove', handleWindowTouchMove); 
             window.removeEventListener('touchend', handleGlobalUp);
             window.removeEventListener('touchcancel', handleGlobalUp);
         };
@@ -439,7 +440,6 @@ function App() {
     };
     const [coordsKey, setCoordsKey] = useState(0); 
     
-    // Fixed: Added block body and cleanup function for useEffect
     useEffect(() => {
         const timer = setTimeout(() => setCoordsKey(k => k + 1), 50);
         return () => clearTimeout(timer);
@@ -484,24 +484,43 @@ function App() {
             </main>
             <Magnifier magnifierState={{...magnifier, cropPoints, measureLines, currentStep: step}} zoom={zoomLevel} cardImage={cardImageForMagnifier}/>
             <footer className="bg-gray-900 border-t border-gray-800 p-3 shrink-0 relative">
-                <div className="max-w-4xl mx-auto w-full relative z-[120]">
+                <div 
+                    className="max-w-4xl mx-auto w-full relative z-[120]"
+                    onMouseUp={(e) => e.nativeEvent.stopPropagation()} 
+                    onTouchEnd={(e) => e.nativeEvent.stopPropagation()}
+                    onMouseDown={(e) => e.nativeEvent.stopPropagation()}
+                    onTouchStart={(e) => e.nativeEvent.stopPropagation()}
+                >
                     {step === 'crop' ? (
-                        <div className="flex flex-col md:flex-row items-center justify-between gap-3">
-                            <div className="text-gray-400 text-xs"><span className="text-green-400 font-bold">Step 1:</span> 拖曳綠點至四角</div>
-                            <div className="flex items-center gap-2 bg-gray-800/50 p-1.5 rounded-lg border border-gray-700">
+                        <div className="flex flex-row items-center justify-between gap-2 w-full">
+                            <div className="flex items-center gap-1 bg-gray-800/50 p-1 rounded-lg border border-gray-700 shrink-0">
                                 <div className="flex flex-col items-center gap-1">
-                                    <button onClick={()=>nudgeCropPoint(0,-1)} disabled={lastActivePointIndex===null} className="w-8 h-8 bg-gray-700 rounded flex items-center justify-center disabled:opacity-30"><ChevronUp size={16}/></button>
-                                    <div className="flex gap-1"><button onClick={()=>nudgeCropPoint(-1,0)} disabled={lastActivePointIndex===null} className="w-8 h-8 bg-gray-700 rounded flex items-center justify-center disabled:opacity-30"><ChevronLeft size={16}/></button><div className="w-8 h-8 flex items-center justify-center text-blue-400">{lastActivePointIndex!==null?<Move size={16}/>:<MousePointer2 size={16}/>}</div><button onClick={()=>nudgeCropPoint(1,0)} disabled={lastActivePointIndex===null} className="w-8 h-8 bg-gray-700 rounded flex items-center justify-center disabled:opacity-30"><ChevronRight size={16}/></button></div>
-                                    <button onClick={()=>nudgeCropPoint(0,1)} disabled={lastActivePointIndex===null} className="w-8 h-8 bg-gray-700 rounded flex items-center justify-center disabled:opacity-30"><ChevronDown size={16}/></button>
+                                    <button onClick={()=>nudgeCropPoint(0,-1)} disabled={lastActivePointIndex===null} className="w-7 h-7 bg-gray-700 rounded flex items-center justify-center disabled:opacity-30 active:bg-blue-600 transition-colors"><ChevronUp size={16}/></button>
+                                    <div className="flex gap-1">
+                                        <button onClick={()=>nudgeCropPoint(-1,0)} disabled={lastActivePointIndex===null} className="w-7 h-7 bg-gray-700 rounded flex items-center justify-center disabled:opacity-30 active:bg-blue-600 transition-colors"><ChevronLeft size={16}/></button>
+                                        <div className="w-7 h-7 flex items-center justify-center text-blue-400">
+                                            {lastActivePointIndex!==null?<Move size={16}/>:<MousePointer2 size={16}/>}
+                                        </div>
+                                        <button onClick={()=>nudgeCropPoint(1,0)} disabled={lastActivePointIndex===null} className="w-7 h-7 bg-gray-700 rounded flex items-center justify-center disabled:opacity-30 active:bg-blue-600 transition-colors"><ChevronRight size={16}/></button>
+                                    </div>
+                                    <button onClick={()=>nudgeCropPoint(0,1)} disabled={lastActivePointIndex===null} className="w-7 h-7 bg-gray-700 rounded flex items-center justify-center disabled:opacity-30 active:bg-blue-600 transition-colors"><ChevronDown size={16}/></button>
                                 </div>
                             </div>
-                            <button onClick={performWarpAndProceed} className="bg-green-600 text-white px-6 py-2 rounded-full font-bold shadow flex items-center gap-2">校正並繼續 <ArrowRight size={18}/></button>
+
+                            <div className="flex flex-col items-end gap-2 flex-1 min-w-0">
+                                <div className="text-gray-400 text-xs text-right truncate w-full">
+                                    <span className="text-green-400 font-bold mr-1">1.</span>
+                                    <span>拖曳綠點至四角 / 點擊微調</span>
+                                </div>
+                                <button onClick={performWarpAndProceed} className="bg-green-600 hover:bg-green-500 text-white px-5 py-2 rounded-full font-bold shadow-lg flex items-center gap-2 text-sm whitespace-nowrap active:scale-95 transition-all">
+                                    校正並繼續 <ArrowRight size={16}/>
+                                </button>
+                            </div>
                         </div>
                     ) : step === 'measure' && (
                         <div className="flex flex-col gap-3">
                             <div className="flex justify-between items-center"><button onClick={()=>setStep('crop')} className="text-gray-500 hover:text-white text-xs flex gap-1"><ArrowLeft size={14}/>重調</button>
                             <div className="flex gap-2 items-center"><button onClick={()=>nudgeLine(-1)} disabled={!selectedLineId} className="w-10 h-10 rounded-full border border-gray-700 flex justify-center items-center disabled:opacity-30">
-                            {/* Logic to change chevron type based on selected line */}
                             {selectedLineId && (selectedLineId.includes('Top') || selectedLineId.includes('Bottom')) ? <ChevronUp size={20}/> : <ChevronLeft size={20}/>}
                             </button><span className="text-xs font-bold text-blue-300 w-24 text-center">{selectedLineId?`${measureLines[selectedLineId].toFixed(2)}%`:'微調'}</span><button onClick={()=>nudgeLine(1)} disabled={!selectedLineId} className="w-10 h-10 rounded-full border border-gray-700 flex justify-center items-center disabled:opacity-30">
                             {selectedLineId && (selectedLineId.includes('Top') || selectedLineId.includes('Bottom')) ? <ChevronDown size={20}/> : <ChevronRight size={20}/>}
